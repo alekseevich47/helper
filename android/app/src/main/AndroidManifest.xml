@@ -48,5 +48,29 @@
             <action android:name="android.intent.action.PROCESS_TEXT"/>
             <data android:mimeType="text/plain"/>
         </intent>
+        <intent>
+            <action android:name="android.intent.action.DIAL"/>
+            <data android:scheme="tel"/>
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.MAIN"/>
+            <category android:name="android.intent.category.LAUNCHER"/>
+        </intent>
+        <intent>
+            <action android:name="com.google.android.dialer.CALL_SETTINGS"/>
+        </intent>
+        <!-- OEM dialers / call settings (package visibility, Android 11+) -->
+        <package android:name="com.samsung.android.dialer"/>
+        <package android:name="com.samsung.android.app.telephonyui"/>
+        <package android:name="com.google.android.dialer"/>
+        <package android:name="com.android.phone"/>
+        <package android:name="com.android.contacts"/>
+        <package android:name="com.oplus.odialer"/>
+        <package android:name="com.coloros.phonemanager"/>
+        <package android:name="com.huawei.contacts"/>
+        <package android:name="com.hihonor.contacts"/>
+        <package android:name="com.nothing.dialer"/>
+        <package android:name="com.sonyericsson.android.socialphonebook"/>
+        <package android:name="com.asus.mobilemanager"/>
     </queries>
 </manifest>

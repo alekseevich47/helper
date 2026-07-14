@@ -1,0 +1,305 @@
+---
+description: Flutter + Dart + Hive CE + PocketBase + Whisper/DeepSeek — архитектура CallMemo
+globs: lib/**/*.{dart},android/**/*,pubspec.yaml,pb_hooks/**/*,schema.json,.env.example,l10n.yaml
+alwaysApply: false
+---
+
+# Стек: CallMemo (Android)
+
+## Контекст
+
+- **Приложение**: CallMemo — Android-приложение для автоматического сбора записей звонков из системной автозаписи «Телефон», транскрипции и AI-анализа. Application ID / Google Play: `com.urban.callmemo`.
+- **Flutter (Dart 3.12+)**, без TypeScript/React Native. Целевая ОС на старте — **только Android** (`minSdk 26`, `targetSdk/compileSdk 34`, JVM 17). iOS — не реализуем без явного запроса.
+- **Локальная БД**: **Hive CE** (`hive_ce` + `hive_ce_flutter`) — звонки, события, заметки, настройки; **offline-first**. Оригинальный `hive` / `hive_generator` не использовать — несовместимы с Dart 3.12+.
+- **Сервер**: PocketBase (один бинарник на VPS) — auth, синхронизация резюме, лимиты минут подписки. Кастомный REST-бэкенд не писать без запроса.
+- **State**: Riverpod (`flutter_riverpod`; codegen — только если реально нужен).
+- **Навигация**: `go_router`. Нижние табы: Звонки | Календарь | Заметки | Профиль.
+- **HTTP (Phase 2+)**: `dio`. Env: `flutter_dotenv` — `AITUNNEL_API_KEY`, `DEEPSEEK_API_KEY`, `POCKETBASE_URL` (не коммитить `.env`).
+- **Транскрипция (Phase 2+)**: Whisper large-v3-turbo через **AITunnel** (`https://api.aitunnel.ru/v1/audio/transcriptions`). Модель по умолчанию — turbo; large-v3 — опция в настройках.
+- **Анализ текста (Phase 2+)**: DeepSeek (`https://api.deepseek.com/v1`, модель `deepseek-chat`) — резюме + извлечение событий в **строгом JSON**.
+- **Аудио**: `just_audio` (плеер); конвертация (Phase 2+) — `ffmpeg_kit_flutter_audio` (pcm/amr → wav/mp3).
+- **Уведомления**: `flutter_local_notifications`. Перед автотранскрипцией — запрос согласия (`notifyBeforeTranscribe`, default `true`); автотранскрипция — default `false`.
+- **Календарь UI**: `table_calendar`. Даты — `intl`.
+- **Дизайн**: Material 3, минимализм; светлая + тёмная тема; **l10n**: `ru` + `en` (`flutter gen-l10n`, arb в `lib/core/l10n/`).
+- **Монетизация (MVP)**: Free / Basic / Pro по лимиту минут распознавания в месяц; платёжные шлюзы (ЮKassa и т.п.) — Phase 3+, на MVP — заглушка тарифов в UI.
+
+## Текущее состояние репозитория (Phase 1 complete)
+
+Решения ниже — факт из кода; при расхождении с планом **обновлять этот раздел**, а не выдумывать несуществующие файлы.
+
+| Что | Статус |
+|-----|--------|
+| `lib/main.dart` / `app.dart` | **Переписаны** (Задача 5): Hive → CallDetectionService → ProviderScope |
+| Структура `lib/` (features, core, data, …) | **Создана** (Задача 1) |
+| Core: constants / theme / format_utils | **Создано** (Задача 2) |
+| l10n (`app_ru.arb` / `app_en.arb`, `l10n.yaml`) | **Создано** (Задача 3) |
+| `pubspec.yaml` | Зависимости Phase 1 (+ `phone_state` для детекции) |
+| `android/` | Настроен: `applicationId com.urban.callmemo`, permissions в `AndroidManifest.xml`, `minSdk 26` |
+| Hive-модели, `hive_provider.dart`, адаптеры | **Создано** (Задача 4) |
+| Роутер | **Создан** (Задача 6): 4 таба + call/notes/settings |
+| Экраны | Все UI Phase 1: calls, calendar, notes, profile, settings, call detail |
+| `CallDetectionService` | **Создан** (Задача 11) |
+| AI / PocketBase / dio / dotenv | **Не подключены** (Phase 1 чист) |
+| `pb_hooks/`, `schema.json` | Пока нет в репозитории — описание схемы ниже для Phase 2+ |
+| `test/widget_test.dart` | Smoke: `ProviderScope` + `CallMemoApp` + `NavigationBar` (Задача 12) |
+| `dart analyze` / `flutter test` | Clean / pass (Задача 12) |
+
+**План Phase 1:** `Tasks/TASKS_start.md` — задачи 0–12 выполнены.
+
+---
+
+## Структура `lib/` (целевая)
+
+| Путь | Назначение |
+|------|------------|
+| `main.dart` / `app.dart` | Точка входа, `ProviderScope`, `MaterialApp.router`, тема, локаль |
+| `router/app_router.dart` | `go_router`: ShellRoute с 4 табами + вложенные маршруты |
+| `core/constants/` | URL API (Phase 2+), лимиты тарифов, пути папок записей по брендам |
+| `core/theme/` | light/dark `ThemeData` (Material 3) |
+| `core/l10n/` | `app_ru.arb`, `app_en.arb`; конфиг — `l10n.yaml` в корне |
+| `core/utils/` | форматтеры длительности/дат, хелперы |
+| `data/local/models/` | Hive-модели: `CallRecord`, `CallEvent`, `Note`, `AppSettings` |
+| `data/local/adapters/` | `hive_adapters.dart` (`@GenerateAdapters`) + сгенерированные `hive_adapters.g.dart`, `hive_registrar.g.dart`, `hive_adapters.g.yaml` |
+| `data/local/hive_provider.dart` | `registerHiveAdapters()`, `initHive()`, box-провайдеры, `settingsProvider` |
+| `data/remote/` | Phase 2+: PocketBase, AITunnel, DeepSeek |
+| `data/repositories/` | Phase 2+: Call / Event / Note / Settings / Usage |
+| `domain/models/` | Опционально: чистые domain-типы, если отделены от Hive |
+| `domain/services/` | `call_detection_service.dart`; Phase 2+: транскрипция, AI, sync |
+| `features/calls/` | список, детали (плеер / резюме / транскрипт / события) |
+| `features/calendar/` | `table_calendar` + события дня |
+| `features/notes/` | список и редактор |
+| `features/profile/` | аккаунт, тариф, минуты (заглушки на Phase 1) |
+| `features/settings/` | тема, язык, автотранскрипция, модель Whisper |
+| `features/onboarding/` | Phase 2+: мастер бренд → автозапись → permissions |
+| `shared/widgets/` | `EmptyStateWidget` и прочие переиспользуемые виджеты |
+
+Сервер (Phase 2+, отдельный деплой или подпапка): `pb_hooks/` (cron сброса минут), `schema.json` — экспорт схемы PB.
+
+---
+
+## Правила кода
+
+### State и архитектура слоёв
+
+- UI — `ConsumerWidget` / `ConsumerStatefulWidget`; бизнес-логику и IO **не** держать в `build()`.
+- State — Riverpod; не плодить `setState` по feature-слоям. Исключение — локальный UI-state (TabController, анимации, TextEditingController).
+- Логику чтения/записи Hive и файловой системы — в `data/local/` и `domain/services/`; экраны только подписываются на провайдеры.
+- **Не** добавлять второй state-менеджер (Bloc, GetX, Provider без Riverpod) без запроса.
+
+### Ошибки, логи, UX
+
+- Все сетевые и файловые операции — `try/catch`; пользователю — короткий `SnackBar` / dialog через l10n, не сырой `e.toString()`.
+- В прод-путях **не** оставлять отладочный `print` — `debugPrint` только под `kDebugMode` или централизованный логгер (Phase 2+).
+- Статусы звонка: `new` → `pending` → `processing` → `done` | `error`. При ошибке API (Phase 2+) — `error` + кнопка повтора в UI.
+- Phase 1: вкладки «Резюме» / «Транскрипция» / «События» — заглушки; кнопка «Повторить» **disabled** с подписью «скоро».
+
+### Безопасность
+
+- Секреты **только** из `.env` / `--dart-define` / flavors; ключи AI и PB URL **не** хардкодить в `lib/`.
+- `.env` в `.gitignore`; в репозитории — только `.env.example` с пустыми ключами и комментариями.
+- PocketBase: auth-токен хранить в Hive (`AppSettings.authToken`) — не в SharedPreferences plaintext без необходимости; при logout — очищать.
+- На сервер **не** заливать аудиофайлы звонков по умолчанию — только метаданные и текст (приватность + экономия).
+- Permissions Android — запрашивать **runtime** через `permission_handler` с объяснением в UI; не запрашивать лишние (камера, геолокация и т.п.).
+- **Не** использовать Accessibility Service / недокументированные хаки для записи линии — только файлы системной автозаписи + MediaStore.
+
+### Производительность
+
+- Списки звонков/заметок — `ListView.builder`, не материализовать тысячи элементов в память.
+- Hive: читать box один раз в провайдере; для списков — `select`/`watch` только нужных полей, не перестраивать весь UI при каждой записи без необходимости.
+- Аудио: `just_audio` — один `AudioPlayer` на экран деталей; `dispose()` в `State.dispose`.
+- Phase 2+: загрузка на Whisper — streaming/chunked где возможно; большие файлы — конвертировать в фоне (`compute` / isolate), не блокировать UI thread.
+- Изображения/иконки — стандартные Material Icons; тяжёлые UI-киты не подключать.
+
+### Локализация и тема
+
+- UI-тексты через `AppLocalizations` (`context.l10n` / generated), **не** хардкодить строки в виджетах (кроме временных debug-меток).
+- `ThemeMode.system | light | dark` из `AppSettings` в Hive; смена темы/языка — без перезапуска приложения.
+- `intl` для форматирования дат/длительности — единые функции в `core/utils/format_utils.dart`.
+
+### Качество и CI-мышление
+
+- После каждой задачи из `TASKS_start.md`: `flutter analyze` — **0 errors**; warnings — по возможности убрать.
+- `flutter test` — обновить smoke-тест под реальный shell приложения (не counter).
+- Эмулятор — для UI; сценарии записи звонков и MediaStore — на **реальном** устройстве (Samsung / Xiaomi / OPPO / Realme / Vivo).
+
+---
+
+## Запись звонков (Android)
+
+- Приложение **не** пишет звонок системным API записи линии. Источник — файл автозаписи из стандартного приложения «Телефон» производителя.
+- После `CALL_STATE_IDLE` — искать новый аудиофайл:
+  - Samsung: `Recordings/Call/`
+  - Xiaomi/Redmi/POCO: `MIUI/sound_recorder/call_rec/`
+  - OPPO/Realme: `ColorOS/PhoneRecords/` (и аналоги)
+  - TECNO / Infinix / itel: `Recordings/Call`, `PhoneRecord`, `Sounds/CallRec`, …
+  - Fallback: MediaStore `audio/*`, `DATE_MODIFIED` за последние ~5 мин (+ keywords)
+- Онбординг (Phase 2+): детект бренда (`device_info_plus`) → инструкция включить **автозапись** в «Телефон» → запрос permissions.
+- Manifest (уже в проекте): `INTERNET`, `READ_PHONE_STATE`, `POST_NOTIFICATIONS`, `READ_MEDIA_AUDIO`, `READ_EXTERNAL_STORAGE` (`maxSdkVersion 32`), `RECEIVE_BOOT_COMPLETED`.
+- Детекция: `phone_state` stream; FAB «Сканировать записи» как ручной fallback (Phase 1).
+- Дубликаты: перед записью в Hive сравнивать `audioFilePath` / hash / mtime с уже сохранёнными записями.
+
+---
+
+## AI pipeline (Phase 2+, не начинать на Phase 1)
+
+```
+звонок завершён → файл в Hive (status: new)
+  → (уведомление «Распознать?» если notifyBeforeTranscribe)
+  → проверка лимита минут (PocketBase users / локальный кэш)
+  → Whisper turbo (AITunnel) → transcriptionText
+  → DeepSeek → summary + events → Hive CallEvent + local notifications
+  → sync call_summaries + usage_log (если auth)
+```
+
+- Ручная загрузка аудио (FAB) — тот же pipeline без telephony.
+- Без сети: UI звонков/заметок/календаря работает; транскрипция — snackbar «нет сети».
+- Аудио на Whisper: при неподдерживаемом формате — конвертировать (цель: моно, ~16 kHz, wav/mp3/m4a).
+- Промпт DeepSeek: только строгий JSON (`summary` + `events[]` с `type`/`title`/`description`/`datetime`); **не** выдумывать события, которых не было в тексте.
+- Типы событий: `reminder` | `meeting` | `birthday` | `task` | `note`.
+- Прямой OpenAI (`api.openai.com`) — **не** использовать; только AITunnel / DeepSeek / PB URL из env.
+
+---
+
+## Локальная БД (Hive CE)
+
+Импорты: `package:hive_ce/hive_ce.dart`, `package:hive_ce_flutter/hive_ce_flutter.dart`.
+
+**Генерация адаптеров (факт в репозитории):** plain Dart-классы в `data/local/models/`; один файл `data/local/adapters/hive_adapters.dart` с `@GenerateAdapters([AdapterSpec<CallRecord>(), …])` и `part 'hive_adapters.g.dart'`. Регистрация — `Hive.registerAdapters()` из `hive_registrar.g.dart` (вызывается в `registerHiveAdapters()`). Схема — `hive_adapters.g.yaml` (**коммитить**).
+
+Не использовать `@HiveType` + `part '../adapters/…'` на моделях — `hive_ce_generator` кладёт `*.g.dart` рядом с `part`, отдельная папка `adapters/` так не работает.
+
+Команда: `flutter pub run build_runner build` (на Windows `dart run build_runner` может падать с «did not contain its own root package»).
+
+Box-ы и typeId — **не менять** без миграции и обновления этого файла.
+
+| Box | typeId | Модель / ключевые поля |
+|-----|--------|------------------------|
+| `calls` | 0 | `CallRecord`: id, phoneNumber?, contactName?, dateTime, durationSeconds, audioFilePath?, transcriptionText?, summaryText?, status, processedAt?, syncedToServer |
+| `events` | 1 | `CallEvent`: id, callId, type, title, description?, eventDateTime?, isCompleted, notificationId? |
+| `notes` | 2 | `Note`: id, title, content, createdAt, updatedAt, linkedCallId? |
+| `settings` | 3 | `AppSettings`: autoTranscribe (false), themeMode, language, whisperModel, notifyBeforeTranscribe (true), userId?, authToken? |
+
+- Единственная запись настроек в box `settings` — ключ фиксированный (например `'app'`).
+- Статусы `CallRecord.status`: `new` | `pending` | `processing` | `done` | `error`.
+- Локальные данные пишутся в Hive **сразу**; PocketBase — синхронизация для **авторизованных** (Phase 2+). Анонимный режим — только локально.
+
+---
+
+## PocketBase (Phase 2+)
+
+Коллекции — создавать в PB Admin по этой схеме; имена полей не выдумывать.
+
+### `users` (auth)
+
+Стандартные поля PB +:
+
+| Поле | Тип | Комментарий |
+|------|-----|-------------|
+| `subscription_type` | select | `free` \| `basic` \| `pro` |
+| `subscription_expires` | date | nullable |
+| `minutes_used` | number | сброс 1-го числа месяца |
+| `minutes_limit` | number | free: 60, basic: 300, pro: большое число |
+
+### `call_summaries`
+
+| Поле | Тип |
+|------|-----|
+| `user` | relation → users |
+| `call_date` | date |
+| `duration_seconds` | number |
+| `summary_text` | text |
+| `events_json` | json |
+| `audio_size_bytes` | number |
+| `synced_at` | date |
+
+### `usage_log`
+
+| Поле | Тип |
+|------|-----|
+| `user` | relation → users |
+| `action` | select: `transcription` \| `analysis` |
+| `minutes_consumed` | number |
+| `created` | autodate |
+
+- Сброс `minutes_used` — 1-го числа месяца (`pb_hooks/` cron).
+- Ошибки API — в services; UI — snackbar / dialog.
+
+---
+
+## Экраны и маршруты
+
+| Маршрут | Экран | Phase 1 |
+|---------|-------|---------|
+| `/` | Список звонков (статус, pull-to-refresh, FAB) | ✓ |
+| `/call/:id` | Детали: плеер; вкладки Резюме / Транскрипция / События | ✓ (заглушки AI) |
+| `/calendar` | `table_calendar` + события дня | ✓ |
+| `/notes` | Список заметок | ✓ |
+| `/notes/:id` | Редактор (`id=new` — создание) | ✓ |
+| `/profile` | План, прогресс минут, выход — заглушки | ✓ |
+| `/settings` | Тема, язык, переключатели AI (disabled на Phase 1) | ✓ |
+| Онбординг | Первый запуск | Phase 2+ |
+
+Shell: `StatefulShellRoute.indexedStack` + `NavigationBar` (Material 3), 4 destination.
+
+---
+
+## Зависимости по фазам
+
+### Phase 1 (текущая) — в `pubspec.yaml`
+
+`flutter_riverpod`, `go_router`, `hive_ce`, `hive_ce_flutter`, `just_audio`, `permission_handler`, `table_calendar`, `uuid`, `intl`, `flutter_local_notifications`, `path_provider`, `device_info_plus`, `share_plus`.
+
+Dev: `hive_ce_generator`, `build_runner`, `flutter_lints`, `flutter_test`.
+
+**Не добавлять на Phase 1:** `dio`, `flutter_dotenv`, `pocketbase`, `ffmpeg_kit_flutter_audio`, `file_picker` (можно позже для FAB загрузки).
+
+### Phase 2
+
++ `dio`, `flutter_dotenv`, `pocketbase`, `ffmpeg_kit_flutter_audio`, `telephony` (или выбранный пакет phone state), `file_picker`.
+
+### Phase 3
+
+Платежи, push через FCM, расширенный онбординг — только по запросу.
+
+---
+
+## Phase 1 — границы (TASKS_start)
+
+**Что НЕ делаем:**
+- Whisper (AITunnel), DeepSeek — никаких запросов к AI.
+- PocketBase — ни auth, ни sync, ни usage.
+- `flutter_dotenv`, `dio`, `ffmpeg_kit_flutter_audio` — не добавлять.
+- Онбординг — отложен.
+- Автотранскрипция — переключатели в UI есть, но **disabled**, логики нет.
+- Платежи — только заглушка Free в профиле.
+
+**Что ДЕЛАЕМ:**
+- Полный UI: навигация (go_router, 4 таба), все экраны по таблице выше.
+- Hive: модели, адаптеры, провайдеры, box-ы.
+- Детекция звонков: telephony → поиск файла → запись в Hive (`status: new`).
+- Плеер: `just_audio` на экране деталей.
+- Тема (light/dark/system) и язык (ru/en) — переключение на лету.
+- Все экраны работают **полностью офлайн**.
+
+**План реализации:** `Tasks/TASKS_start.md`.
+
+---
+
+## Phase 2+ (кратко, не начинать до завершения Phase 1)
+
+1. **Phase 2a** — AI pipeline (Whisper + DeepSeek), лимиты минут, уведомления перед распознаванием.
+2. **Phase 2b** — PocketBase auth + sync `call_summaries` / `usage_log`.
+3. **Phase 2c** — онбординг (бренд, permissions, инструкции).
+4. **Phase 3** — тарифы/оплата, iOS (если запроено).
+
+---
+
+## Ограничения при правках
+
+- Минимальный diff; не трогать `build/`, `.dart_tool/`, `node_modules`, секреты `.env`.
+- Не переносить проект на React Native / нативный Kotlin «с нуля» без запроса.
+- Не подключать прямой OpenAI — только AITunnel / DeepSeek / PB URL из env.
+- Не обещать автозапись звонка через Accessibility-хаки.
+- Коммиты и push — только по явной просьбе пользователя.
+- iOS / конференц-запись / платёжные шлюзы — не начинать, пока не запрошено.
+- При добавлении полей Hive — bump typeId **не** использовать повторно; миграция или новый typeId.
